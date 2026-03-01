@@ -5,15 +5,17 @@ import {
     ChevronRight,
     Compass,
     Edit2,
-    ZoomIn,
-    ZoomOut,
-    RotateCcw,
+    PenTool,
+    Eraser,
     Trash2,
+    Layers,
+    BookOpen
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import { getDocument, updateMetadata, metaDb } from '../db';
 import GyroscopeWrapper from './GyroscopeWrapper';
+import PageRenderer from './PageRenderer';
 import { FileOpener } from '@capacitor-community/file-opener';
 import { Capacitor } from '@capacitor/core';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -22,9 +24,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 const MIN_ZOOM = 0.75;
 const MAX_ZOOM = 2.5;
-const BASE_RENDER_SCALE = 1.5;
-const HIGHLIGHT_COLOR = 'rgba(255, 235, 59, 0.4)';
-const HIGHLIGHT_WIDTH = 15;
 
 function base64FromBuffer(buffer) {
     let binary = '';
@@ -41,24 +40,44 @@ export default function DocumentViewer({ docId, onClose }) {
     const [pageNum, setPageNum] = useState(1);
     const [numPages, setNumPages] = useState(0);
     const [meta, setMeta] = useState(null);
+
+    // View Tools
     const [gyroActive, setGyroActive] = useState(false);
-    const [isHighlighting, setIsHighlighting] = useState(false);
     const [zoom, setZoom] = useState(1);
-    const canvasRef = useRef(null);
-    const drawCanvasRef = useRef(null);
+    const [viewMode, setViewMode] = useState('swipe'); // 'swipe' or 'scroll'
+
+    // Drawing Tools
+    const [drawMode, setDrawMode] = useState(null); // 'highlight', 'pen', 'pencil', 'eraser', null
+    const [drawColor, setDrawColor] = useState('rgba(255, 235, 59, 0.4)');
+
     const [paths, setPaths] = useState([]);
-    const isDrawing = useRef(false);
-    const currentPath = useRef([]);
     const hasLoadedPathsRef = useRef(false);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState('');
     const [gyroError, setGyroError] = useState('');
     const [gyroSupported, setGyroSupported] = useState(false);
 
-    const currentPagePaths = useMemo(
-        () => paths.filter((path) => path.page === pageNum),
-        [paths, pageNum],
-    );
+    const onPathAdd = useCallback((newPath) => {
+        setPaths(prev => [...prev, newPath]);
+    }, []);
+
+    const onPathRemove = useCallback((pageNumToSearch, indexInPage) => {
+        setPaths(prev => {
+            const newPaths = [...prev];
+            // Find finding nth path of this page
+            let count = -1;
+            for (let i = 0; i < newPaths.length; i++) {
+                if (newPaths[i].page === pageNumToSearch) {
+                    count++;
+                    if (count === indexInPage) {
+                        newPaths.splice(i, 1);
+                        break;
+                    }
+                }
+            }
+            return newPaths;
+        });
+    }, []);
 
     useEffect(() => {
         const supported = typeof window !== 'undefined' && 'DeviceOrientationEvent' in window;
@@ -158,75 +177,6 @@ export default function DocumentViewer({ docId, onClose }) {
         };
     }, [docId]);
 
-    const redrawPaths = useCallback((pagePaths) => {
-        const drawCanvas = drawCanvasRef.current;
-        if (!drawCanvas) return;
-
-        const ctx = drawCanvas.getContext('2d');
-        if (!ctx) return;
-
-        ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        pagePaths.forEach((path) => {
-            if (!Array.isArray(path.points) || path.points.length === 0) return;
-            ctx.beginPath();
-            ctx.strokeStyle = path.color ?? HIGHLIGHT_COLOR;
-            ctx.lineWidth = path.width ?? HIGHLIGHT_WIDTH;
-            ctx.moveTo(path.points[0].x, path.points[0].y);
-            for (let i = 1; i < path.points.length; i++) {
-                ctx.lineTo(path.points[i].x, path.points[i].y);
-            }
-            ctx.stroke();
-        });
-    }, []);
-
-    useEffect(() => {
-        if (!pdfDoc || !canvasRef.current || !drawCanvasRef.current) return;
-
-        let renderTask = null;
-        let active = true;
-
-        const renderPage = async () => {
-            try {
-                const page = await pdfDoc.getPage(pageNum);
-                if (!active) return;
-
-                const viewport = page.getViewport({ scale: zoom * BASE_RENDER_SCALE });
-                const canvas = canvasRef.current;
-                const context = canvas.getContext('2d');
-                if (!context) return;
-
-                canvas.height = viewport.height;
-                canvas.width = viewport.width;
-                drawCanvasRef.current.width = viewport.width;
-                drawCanvasRef.current.height = viewport.height;
-
-                const renderContext = {
-                    canvasContext: context,
-                    viewport,
-                };
-
-                renderTask = page.render(renderContext);
-                await renderTask.promise;
-            } catch (err) {
-                if (err.name !== 'RenderingCancelledException') {
-                    console.error('Error rendering page:', err);
-                    setError('Could not render this page.');
-                }
-            }
-        };
-
-        renderPage();
-
-        return () => {
-            active = false;
-            if (renderTask) {
-                renderTask.cancel();
-            }
-        };
-    }, [pdfDoc, pageNum, zoom]);
-
     useEffect(() => {
         if (docId && pdfDoc) {
             updateMetadata(docId, { lastPage: pageNum }).catch((err) => {
@@ -234,10 +184,6 @@ export default function DocumentViewer({ docId, onClose }) {
             });
         }
     }, [pageNum, docId, pdfDoc]);
-
-    useEffect(() => {
-        redrawPaths(currentPagePaths);
-    }, [currentPagePaths, redrawPaths]);
 
     useEffect(() => {
         if (!docId || !meta) return;
@@ -252,80 +198,72 @@ export default function DocumentViewer({ docId, onClose }) {
         });
     }, [paths, docId, meta]);
 
-    const getCanvasPoint = useCallback((event) => {
-        const canvas = drawCanvasRef.current;
-        if (!canvas) return null;
+    // Pinch to Zoom & Swipe gestures
+    const initialPinchDist = useRef(null);
+    const initialZoom = useRef(1);
+    const touchStartX = useRef(null);
+    const touchStartY = useRef(null);
+    const [visualScale, setVisualScale] = useState(1);
+    const [visualOrigin, setVisualOrigin] = useState('center center');
 
-        const rect = canvas.getBoundingClientRect();
-        if (!rect.width || !rect.height) return null;
+    const handleTouchStart = (e) => {
+        if (e.touches.length === 2 && !drawMode) {
+            const dist = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+            initialPinchDist.current = dist;
+            initialZoom.current = zoom;
 
-        const scaleX = canvas.width / rect.width;
-        const scaleY = canvas.height / rect.height;
-
-        return {
-            x: (event.clientX - rect.left) * scaleX,
-            y: (event.clientY - rect.top) * scaleY,
-        };
-    }, []);
-
-    const handlePointerDown = (e) => {
-        if (!isHighlighting || !drawCanvasRef.current) return;
-
-        const point = getCanvasPoint(e);
-        if (!point) return;
-
-        isDrawing.current = true;
-        drawCanvasRef.current.setPointerCapture(e.pointerId);
-        currentPath.current = [point];
-
-        const ctx = drawCanvasRef.current.getContext('2d');
-        if (!ctx) return;
-        ctx.beginPath();
-        ctx.moveTo(point.x, point.y);
+            // Calculate center of pinch to use as transform origin
+            const centerX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+            const centerY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+            setVisualOrigin(`${centerX}px ${centerY}px`);
+        } else if (e.touches.length === 1 && viewMode === 'swipe' && !drawMode && zoom <= 1.1) {
+            touchStartX.current = e.touches[0].clientX;
+            touchStartY.current = e.touches[0].clientY;
+        } else {
+            touchStartX.current = null;
+            touchStartY.current = null;
+        }
     };
 
-    const handlePointerMove = (e) => {
-        if (!isDrawing.current || !isHighlighting || !drawCanvasRef.current) return;
-
-        const point = getCanvasPoint(e);
-        if (!point) return;
-        currentPath.current.push(point);
-
-        const ctx = drawCanvasRef.current.getContext('2d');
-        if (!ctx) return;
-        ctx.strokeStyle = HIGHLIGHT_COLOR;
-        ctx.lineWidth = HIGHLIGHT_WIDTH;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.lineTo(point.x, point.y);
-        ctx.stroke();
+    const handleTouchMove = (e) => {
+        if (e.touches.length === 2 && initialPinchDist.current && !drawMode) {
+            e.preventDefault(); // prevent scroll
+            const dist = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+            const scale = dist / initialPinchDist.current;
+            const nextZoom = initialZoom.current * scale;
+            const clampedZoom = Math.min(Math.max(nextZoom, MIN_ZOOM), MAX_ZOOM);
+            setVisualScale(clampedZoom / initialZoom.current);
+        }
     };
 
-    const handlePointerUp = (e) => {
-        if (!isDrawing.current || !isHighlighting || !drawCanvasRef.current) return;
-
-        isDrawing.current = false;
-        try {
-            drawCanvasRef.current.releasePointerCapture(e.pointerId);
-        } catch {
-            // Ignore if capture is already released.
+    const handleTouchEnd = (e) => {
+        if (initialPinchDist.current) {
+            const finalZoom = Number((initialZoom.current * visualScale).toFixed(2));
+            setZoom(finalZoom);
+            setVisualScale(1);
+            initialPinchDist.current = null;
         }
 
-        const nextPathPoints = currentPath.current;
-        currentPath.current = [];
+        if (touchStartX.current && viewMode === 'swipe' && !drawMode && zoom <= 1.1) {
+            if (e.changedTouches.length === 0) return;
+            const touchEndX = e.changedTouches[0].clientX;
+            const touchEndY = e.changedTouches[0].clientY;
+            const dx = touchStartX.current - touchEndX;
+            const dy = touchStartY.current - touchEndY;
 
-        const ctx = drawCanvasRef.current.getContext('2d');
-        if (ctx) ctx.beginPath();
-
-        if (nextPathPoints.length > 1) {
-            const newPath = {
-                page: pageNum,
-                color: HIGHLIGHT_COLOR,
-                width: HIGHLIGHT_WIDTH,
-                points: nextPathPoints,
-            };
-            setPaths((prev) => [...prev, newPath]);
+            if (Math.abs(dx) > 60 && Math.abs(dy) < 60) {
+                if (dx > 0) changePage(1);
+                else changePage(-1);
+            }
         }
+        touchStartX.current = null;
+        touchStartY.current = null;
     };
 
     const changePage = (offset) => {
@@ -346,7 +284,12 @@ export default function DocumentViewer({ docId, onClose }) {
     };
 
     const clearCurrentPageHighlights = () => {
-        setPaths((prev) => prev.filter((path) => path.page !== pageNum));
+        setPaths((prev) => prev.filter((path) => viewMode === 'swipe' ? path.page !== pageNum : true));
+        if (viewMode === 'scroll') {
+            if (window.confirm("Clear all paths from all pages?")) {
+                setPaths([]);
+            }
+        }
     };
 
     const toggleGyroscope = async () => {
@@ -386,7 +329,7 @@ export default function DocumentViewer({ docId, onClose }) {
     };
 
     return (
-        <div className="viewer-container">
+        <div className="viewer-container" style={{ display: 'flex', flexDirection: 'column', height: '100vh', width: '100vw' }}>
             <div className="viewer-header glass">
                 <div className="header-left">
                     <button type="button" onClick={onClose} aria-label="Back to library">
@@ -395,41 +338,91 @@ export default function DocumentViewer({ docId, onClose }) {
                     <span className="doc-title">{meta ? meta.name : 'Loading...'}</span>
                 </div>
                 <div className="header-right">
+                    <div className="mode-toggle">
+                        <button
+                            className={`mode-toggle-btn ${viewMode === 'swipe' ? 'active' : ''}`}
+                            onClick={() => setViewMode('swipe')}
+                        >
+                            <BookOpen size={16} style={{ marginRight: '4px' }} /> Swipe
+                        </button>
+                        <button
+                            className={`mode-toggle-btn ${viewMode === 'scroll' ? 'active' : ''}`}
+                            onClick={() => setViewMode('scroll')}
+                        >
+                            <Layers size={16} style={{ marginRight: '4px' }} /> Scroll
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div className="toolbar-panel glass">
+                <div className="toolbar-group">
                     <button
                         type="button"
-                        onClick={() => setIsHighlighting((prev) => !prev)}
-                        className={isHighlighting ? 'gyro-active' : ''}
-                        aria-label="Toggle highlighter"
-                        title="Toggle highlighter"
+                        onClick={() => setDrawMode(prev => prev === 'highlight' ? null : 'highlight')}
+                        className={`tool-btn ${drawMode === 'highlight' ? 'active' : ''}`}
+                        title="Highlighter"
                     >
-                        <Edit2 size={24} />
+                        <Edit2 size={20} />
                     </button>
+                    <button
+                        type="button"
+                        onClick={() => setDrawMode(prev => prev === 'pen' ? null : 'pen')}
+                        className={`tool-btn ${drawMode === 'pen' ? 'active' : ''}`}
+                        title="Pen"
+                    >
+                        <PenTool size={20} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setDrawMode(prev => prev === 'pencil' ? null : 'pencil')}
+                        className={`tool-btn ${drawMode === 'pencil' ? 'active' : ''}`}
+                        title="Pencil"
+                    >
+                        <Edit2 size={20} strokeWidth={1} style={{ transform: 'scale(0.8)' }} />
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setDrawMode(prev => prev === 'eraser' ? null : 'eraser')}
+                        className={`tool-btn ${drawMode === 'eraser' ? 'active' : ''}`}
+                        title="Eraser"
+                    >
+                        <Eraser size={20} />
+                    </button>
+                </div>
+
+                {(drawMode === 'highlight' || drawMode === 'pen' || drawMode === 'pencil') && (
+                    <div className="toolbar-group">
+                        {['rgba(255, 235, 59, 0.4)', 'rgba(244, 67, 54, 0.6)', 'rgba(33, 150, 243, 0.6)', 'rgba(76, 175, 80, 0.6)', '#000000', '#ffffff'].map(color => (
+                            <button
+                                key={color}
+                                className={`color-btn ${drawColor === color ? 'active' : ''}`}
+                                style={{ backgroundColor: color.replace('0.4)', '1)').replace('0.6)', '1)') }}
+                                onClick={() => setDrawColor(color)}
+                            />
+                        ))}
+                    </div>
+                )}
+
+                <div className="toolbar-group">
                     <button
                         type="button"
                         onClick={clearCurrentPageHighlights}
-                        disabled={currentPagePaths.length === 0}
-                        aria-label="Clear highlights on this page"
-                        title="Clear highlights on this page"
+                        className="tool-btn"
+                        title={viewMode === 'swipe' ? "Clear highlights on this page" : "Clear all highlights"}
                     >
                         <Trash2 size={20} />
                     </button>
+                </div>
+
+                <div className="toolbar-group" style={{ marginLeft: 'auto', borderRight: 'none' }}>
                     <button
                         type="button"
                         onClick={toggleGyroscope}
-                        className={gyroActive ? 'gyro-active' : ''}
-                        aria-label="Toggle gyroscope"
+                        className={`tool-btn ${gyroActive ? 'active' : ''}`}
                         title="Toggle gyroscope"
                     >
-                        <Compass size={24} />
-                    </button>
-                    <button type="button" onClick={() => changeZoom(-0.1)} aria-label="Zoom out" title="Zoom out">
-                        <ZoomOut size={20} />
-                    </button>
-                    <button type="button" onClick={() => setZoom(1)} aria-label="Reset zoom" title="Reset zoom">
-                        <RotateCcw size={20} />
-                    </button>
-                    <button type="button" onClick={() => changeZoom(0.1)} aria-label="Zoom in" title="Zoom in">
-                        <ZoomIn size={20} />
+                        <Compass size={20} />
                     </button>
                 </div>
             </div>
@@ -438,9 +431,14 @@ export default function DocumentViewer({ docId, onClose }) {
             <div
                 className="pdf-canvas-container"
                 style={{
-                    overflow: gyroActive ? 'hidden' : 'auto',
-                    touchAction: isHighlighting ? 'none' : 'pan-y',
+                    flex: 1,
+                    overflow: viewMode === 'scroll' ? 'hidden' : 'hidden', // Scroll handled internally or by wrapper
+                    position: 'relative'
                 }}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+                onTouchCancel={handleTouchEnd}
             >
                 {isLoading ? (
                     <p className="viewer-message">Loading PDF...</p>
@@ -448,38 +446,68 @@ export default function DocumentViewer({ docId, onClose }) {
                     <p className="viewer-message viewer-error">{error}</p>
                 ) : (
                     <GyroscopeWrapper isActive={gyroActive}>
-                        <div style={{ position: 'relative' }}>
-                            <canvas ref={canvasRef} />
-                            <canvas
-                                ref={drawCanvasRef}
-                                style={{
-                                    position: 'absolute',
-                                    top: 0,
-                                    left: 0,
-                                    zIndex: 10,
-                                    pointerEvents: isHighlighting ? 'auto' : 'none',
-                                }}
-                                onPointerDown={handlePointerDown}
-                                onPointerMove={handlePointerMove}
-                                onPointerUp={handlePointerUp}
-                                onPointerCancel={handlePointerUp}
-                                onPointerLeave={handlePointerUp}
-                            />
-                        </div>
+                        {viewMode === 'scroll' ? (
+                            <div className="scroll-container" style={{
+                                margin: 0,
+                                transform: `scale(${visualScale})`,
+                                transformOrigin: visualOrigin,
+                                transition: visualScale === 1 ? 'transform 0.1s ease-out' : 'none'
+                            }}>
+                                {Array.from({ length: numPages }).map((_, i) => (
+                                    <PageRenderer
+                                        key={`page-${i + 1}`}
+                                        pdfDoc={pdfDoc}
+                                        pageNum={i + 1}
+                                        zoom={zoom}
+                                        paths={paths.filter((p) => p.page === i + 1)}
+                                        onPathAdd={onPathAdd}
+                                        onPathRemove={(idx) => onPathRemove(i + 1, idx)}
+                                        drawMode={drawMode}
+                                        drawColor={drawColor}
+                                        lazyLoad={true}
+                                    />
+                                ))}
+                            </div>
+                        ) : (
+                            <div style={{
+                                display: 'flex',
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                                width: '100%',
+                                height: '100%',
+                                transform: `scale(${visualScale})`,
+                                transformOrigin: visualOrigin,
+                                transition: visualScale === 1 ? 'transform 0.1s ease-out' : 'none'
+                            }}>
+                                <PageRenderer
+                                    pdfDoc={pdfDoc}
+                                    pageNum={pageNum}
+                                    zoom={zoom}
+                                    paths={paths.filter((p) => p.page === pageNum)}
+                                    onPathAdd={onPathAdd}
+                                    onPathRemove={(idx) => onPathRemove(pageNum, idx)}
+                                    drawMode={drawMode}
+                                    drawColor={drawColor}
+                                    lazyLoad={false}
+                                />
+                            </div>
+                        )}
                     </GyroscopeWrapper>
                 )}
             </div>
 
-            <div className="bottom-bar glass">
-                <button type="button" onClick={() => changePage(-1)} disabled={pageNum <= 1}>
-                    <ChevronLeft size={28} />
-                </button>
-                <span>{pageNum} / {numPages || '-'}</span>
-                <span>{Math.round(zoom * 100)}%</span>
-                <button type="button" onClick={() => changePage(1)} disabled={pageNum >= numPages}>
-                    <ChevronRight size={28} />
-                </button>
-            </div>
+            {viewMode === 'swipe' && (
+                <div className="bottom-bar glass">
+                    <button type="button" onClick={() => changePage(-1)} disabled={pageNum <= 1}>
+                        <ChevronLeft size={28} />
+                    </button>
+                    <span>{pageNum} / {numPages || '-'}</span>
+                    <span>{Math.round(zoom * 100)}%</span>
+                    <button type="button" onClick={() => changePage(1)} disabled={pageNum >= numPages}>
+                        <ChevronRight size={28} />
+                    </button>
+                </div>
+            )}
         </div>
     );
 }

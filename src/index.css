@@ -14,13 +14,15 @@
   margin: 0;
   padding: 0;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
-  user-select: none; /* Prevent accidental text selection on UI except viewer */
+  user-select: none;
+  /* Prevent accidental text selection on UI except viewer */
 }
 
 body {
   background-color: var(--bg-color);
   color: var(--text-color);
-  overflow: hidden; /* Prevent scrolling on body, handle internally */
+  overflow: hidden;
+  /* Prevent scrolling on body, handle internally */
   touch-action: auto;
   width: 100vw;
   height: 100vh;
@@ -70,4 +72,96 @@ button:disabled {
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--border-color);
+}
+
+/* Toolbars */
+.toolbar-panel {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--surface-color);
+  scrollbar-width: none;
+  /* Firefox */
+}
+
+.toolbar-panel::-webkit-scrollbar {
+  display: none;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-right: 1px solid var(--border-color);
+  padding-right: 0.5rem;
+}
+
+.toolbar-group:last-child {
+  border-right: none;
+}
+
+.tool-btn {
+  border-radius: 8px;
+  padding: 0.5rem;
+  color: var(--text-muted);
+}
+
+.tool-btn.active {
+  background-color: var(--primary-color);
+  color: #000;
+}
+
+.color-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  padding: 0;
+  margin: 0 4px;
+}
+
+.color-btn.active {
+  border-color: #fff;
+  transform: scale(1.1);
+}
+
+.mode-toggle {
+  display: flex;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 2px;
+}
+
+.mode-toggle-btn {
+  padding: 4px 12px;
+  border-radius: 18px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.mode-toggle-btn.active {
+  background: var(--primary-color);
+  color: #000;
+}
+
+.scroll-container {
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem 0;
+}
+
+.pdf-page-wrapper {
+  position: relative;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  background: #fff;
+  /* PDF background */
 }

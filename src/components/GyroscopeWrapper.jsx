@@ -23,7 +23,8 @@ export default function GyroscopeWrapper({ children, isActive }) {
 
         let baselineBeta = null;
         let baselineGamma = null;
-        const MAX_SHIFT = 80;
+        const MAX_SHIFT_X = 80;
+        const MAX_SHIFT_Y = 1500; // Allow much larger flow on Y-axis
         const SENSITIVITY = 2.1;
         const DEAD_ZONE = 1.2;
         const SMOOTHING = 0.22;
@@ -44,8 +45,8 @@ export default function GyroscopeWrapper({ children, isActive }) {
             if (Math.abs(deltaBeta) < DEAD_ZONE) deltaBeta = 0;
             if (Math.abs(deltaGamma) < DEAD_ZONE) deltaGamma = 0;
 
-            const moveY = clamp(deltaBeta * SENSITIVITY, -MAX_SHIFT, MAX_SHIFT);
-            const moveX = clamp(deltaGamma * SENSITIVITY, -MAX_SHIFT, MAX_SHIFT);
+            const moveY = clamp(deltaBeta * SENSITIVITY, -MAX_SHIFT_Y, MAX_SHIFT_Y);
+            const moveX = clamp(deltaGamma * SENSITIVITY, -MAX_SHIFT_X, MAX_SHIFT_X);
 
             targetOffsetRef.current = { x: -moveX, y: -moveY };
         };
