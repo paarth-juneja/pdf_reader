@@ -14,6 +14,9 @@ import * as pdfjsLib from 'pdfjs-dist';
 import pdfjsWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import { getDocument, updateMetadata, metaDb } from '../db';
 import GyroscopeWrapper from './GyroscopeWrapper';
+import { FileOpener } from '@capacitor-community/file-opener';
+import { Capacitor } from '@capacitor/core';
+import { Filesystem, Directory } from '@capacitor/filesystem';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
@@ -22,6 +25,16 @@ const MAX_ZOOM = 2.5;
 const BASE_RENDER_SCALE = 1.5;
 const HIGHLIGHT_COLOR = 'rgba(255, 235, 59, 0.4)';
 const HIGHLIGHT_WIDTH = 15;
+
+function base64FromBuffer(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+}
 
 export default function DocumentViewer({ docId, onClose }) {
     const [pdfDoc, setPdfDoc] = useState(null);
@@ -74,6 +87,39 @@ export default function DocumentViewer({ docId, onClose }) {
                     throw new Error('Document not found in local storage.');
                 }
                 if (!active) return;
+
+                // If the file is not a PDF, try to open natively
+                if (metadata && metadata.name) {
+                    const ext = metadata.name.split('.').pop().toLowerCase();
+                    if (['docx', 'doc', 'pptx', 'ppt', 'xlsx', 'xls'].includes(ext)) {
+                        if (Capacitor.isNativePlatform()) {
+                            try {
+                                const base64Data = base64FromBuffer(data);
+                                const path = `${metadata.name}`;
+
+                                const result = await Filesystem.writeFile({
+                                    path,
+                                    data: base64Data,
+                                    directory: Directory.Cache
+                                });
+
+                                await FileOpener.open({
+                                    filePath: result.uri,
+                                    contentType: ext === 'docx' || ext === 'doc' ? 'application/msword' :
+                                        ext === 'pptx' || ext === 'ppt' ? 'application/vnd.ms-powerpoint' :
+                                            'application/vnd.ms-excel'
+                                });
+                            } catch (err) {
+                                console.error("Native open failed:", err);
+                                alert("Failed to open document on this device.");
+                            }
+                        } else {
+                            alert(`Viewing ${ext.toUpperCase()} files is only supported on the mobile app.`);
+                        }
+                        onClose();
+                        return;
+                    }
+                }
 
                 loadingTask = pdfjsLib.getDocument({ data });
                 const pdf = await loadingTask.promise;
